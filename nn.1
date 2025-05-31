@@ -1,0 +1,371 @@
+import os
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from google.colab import files
+
+# Upload the file
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+df = pd.read_csv(filename)
+
+
+# Define input features (your original selection)
+selected_input_indices = [0, 6, 13, 18, 19]
+input_cols = df.columns[selected_input_indices]
+target_cols = df.columns[20:]
+
+print(f"Input features: {list(input_cols)}")
+print(f"Total target games: {len(target_cols)}")
+
+# Create 3 groups from the target columns
+group1_cols = target_cols[0:10]   # Games 1-10
+group2_cols = target_cols[10:20]  # Games 11-20  
+group3_cols = target_cols[20:30]  # Games 21-30
+
+print(f"Group 1 (Games 1-10): {len(group1_cols)} games")
+print(f"Group 2 (Games 11-20): {len(group2_cols)} games") 
+print(f"Group 3 (Games 21-30): {len(group3_cols)} games")
+
+# Create input matrix
+X = df[input_cols].values
+
+# Create grouped targets by averaging within each group
+y_group1 = df[group1_cols].mean(axis=1).values  # Average of games 1-10
+y_group2 = df[group2_cols].mean(axis=1).values  # Average of games 11-20
+y_group3 = df[group3_cols].mean(axis=1).values  # Average of games 21-30
+
+# Combine into single target matrix
+y = np.column_stack([y_group1, y_group2, y_group3])
+
+print(f"X shape: {X.shape}")
+print(f"y shape: {y.shape}")
+print(f"Now predicting 3 group averages instead of {len(target_cols)} individual games")
+
+# Check for NaN values
+print(f"NaN in X: {np.isnan(X).sum()}")
+print(f"NaN in y: {np.isnan(y).sum()}")
+
+# Remove any rows with NaN
+mask = ~(np.isnan(X).any(axis=1) | np.isnan(y).any(axis=1))
+X = X[mask]
+y = y[mask]
+
+print(f"After removing NaN - X shape: {X.shape}, y shape: {y.shape}")
+
+# Show statistics for each group
+print("\nGroup Statistics:")
+print(f"Group 1 - Mean: {y[:, 0].mean():.3f}, Std: {y[:, 0].std():.3f}, Range: [{y[:, 0].min():.1f}, {y[:, 0].max():.1f}]")
+print(f"Group 2 - Mean: {y[:, 1].mean():.3f}, Std: {y[:, 1].std():.3f}, Range: [{y[:, 1].min():.1f}, {y[:, 1].max():.1f}]")
+print(f"Group 3 - Mean: {y[:, 2].mean():.3f}, Std: {y[:, 2].std():.3f}, Range: [{y[:, 2].min():.1f}, {y[:, 2].max():.1f}]")
+
+# Check correlations between groups
+group_corr = np.corrcoef(y.T)
+print(f"\nCorrelations between groups:")
+print(f"Group 1 vs Group 2: {group_corr[0, 1]:.3f}")
+print(f"Group 1 vs Group 3: {group_corr[0, 2]:.3f}")
+print(f"Group 2 vs Group 3: {group_corr[1, 2]:.3f}")
+
+# Visualize group correlations
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.scatter(y[:, 0], y[:, 1], alpha=0.6)
+plt.xlabel('Group 1 (Games 1-10)')
+plt.ylabel('Group 2 (Games 11-20)')
+plt.title(f'Group 1 vs Group 2\nCorr: {group_corr[0, 1]:.3f}')
+plt.grid(True)
+
+plt.subplot(1, 3, 2)
+plt.scatter(y[:, 0], y[:, 2], alpha=0.6)
+plt.xlabel('Group 1 (Games 1-10)')
+plt.ylabel('Group 3 (Games 21-30)')
+plt.title(f'Group 1 vs Group 3\nCorr: {group_corr[0, 2]:.3f}')
+plt.grid(True)
+
+plt.subplot(1, 3, 3)
+plt.scatter(y[:, 1], y[:, 2], alpha=0.6)
+plt.xlabel('Group 2 (Games 11-20)')
+plt.ylabel('Group 3 (Games 21-30)')
+plt.title(f'Group 2 vs Group 3\nCorr: {group_corr[1, 2]:.3f}')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Scale features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.2, random_state=42
+)
+
+print(f"Train: {X_train.shape}, Test: {X_test.shape}")
+
+# Dataset class
+class GroupGameDataset(Dataset):
+    def __init__(self, features, targets):
+        self.X = torch.FloatTensor(features)
+        self.y = torch.FloatTensor(targets)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+# Create datasets
+train_dataset = GroupGameDataset(X_train, y_train)
+test_dataset = GroupGameDataset(X_test, y_test)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+# Model for 3 group prediction
+class ThreeGroupGameModel(nn.Module):
+    def __init__(self, input_dim, output_dim=3):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.3),
+            
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.BatchNorm1d(64),
+            nn.Dropout(0.2),
+            
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            
+            nn.Linear(32, output_dim)  # 3 outputs for 3 groups
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+# Create model
+model = ThreeGroupGameModel(input_dim=X_scaled.shape[1], output_dim=3)
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+
+print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+print("Model architecture:")
+print(model)
+
+# Training function
+def train_group_model(model, train_loader, test_loader, criterion, optimizer, scheduler, epochs=150):
+    train_losses = []
+    val_losses = []
+    best_val_loss = float('inf')
+    patience = 15
+    patience_counter = 0
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_loss = 0
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
+        
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in test_loader:
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                val_loss += loss.item()
+        
+        val_loss /= len(test_loader)
+        val_losses.append(val_loss)
+        
+        # Update learning rate
+        scheduler.step(val_loss)
+        
+        # Print progress
+        if (epoch + 1) % 25 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f'Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.6f}')
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), 'best_group_model.pt')
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f'Early stopping at epoch {epoch+1}')
+                break
+    
+    return train_losses, val_losses
+
+# Train the model
+print("\nStarting training...")
+train_losses, val_losses = train_group_model(model, train_loader, test_loader, criterion, optimizer, scheduler, epochs=200)
+
+# Load best model
+model.load_state_dict(torch.load('best_group_model.pt'))
+print("Best model loaded!")
+
+# Evaluation function
+def evaluate_group_model(model, test_loader):
+    model.eval()
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            outputs = model(batch_X)
+            all_preds.append(outputs.numpy())
+            all_targets.append(batch_y.numpy())
+    
+    y_pred = np.concatenate(all_preds, axis=0)
+    y_true = np.concatenate(all_targets, axis=0)
+    
+    # Calculate metrics for each group
+    group_metrics = {}
+    for i, group_name in enumerate(['Group 1 (Games 1-10)', 'Group 2 (Games 11-20)', 'Group 3 (Games 21-30)']):
+        rmse = np.sqrt(mean_squared_error(y_true[:, i], y_pred[:, i]))
+        r2 = r2_score(y_true[:, i], y_pred[:, i])
+        mae = np.mean(np.abs(y_true[:, i] - y_pred[:, i]))
+        
+        group_metrics[group_name] = {
+            'rmse': rmse,
+            'r2': r2, 
+            'mae': mae
+        }
+    
+    # Overall metrics
+    overall_rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    overall_r2 = r2_score(y_true, y_pred)
+    overall_mae = np.mean(np.abs(y_true - y_pred))
+    
+    return y_true, y_pred, group_metrics, overall_rmse, overall_r2, overall_mae
+
+# Evaluate model
+y_true, y_pred, group_metrics, overall_rmse, overall_r2, overall_mae = evaluate_group_model(model, test_loader)
+
+print("\n" + "="*60)
+print("FINAL RESULTS - 3 GROUP MODEL")
+print("="*60)
+print(f"Overall RMSE: {overall_rmse:.4f}")
+print(f"Overall R² Score: {overall_r2:.4f}")
+print(f"Overall MAE: {overall_mae:.4f}")
+
+print(f"\nIndividual Group Performance:")
+for group_name, metrics in group_metrics.items():
+    print(f"{group_name}:")
+    print(f"  RMSE: {metrics['rmse']:.4f}")
+    print(f"  R²:   {metrics['r2']:.4f}")
+    print(f"  MAE:  {metrics['mae']:.4f}")
+
+# Comprehensive visualization
+plt.figure(figsize=(20, 12))
+
+# Training curves
+plt.subplot(3, 4, 1)
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Val Loss')
+plt.title('Training Progress')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+# Individual group predictions
+group_names = ['Group 1 (Games 1-10)', 'Group 2 (Games 11-20)', 'Group 3 (Games 21-30)']
+for i in range(3):
+    plt.subplot(3, 4, i + 2)
+    plt.scatter(y_true[:, i], y_pred[:, i], alpha=0.6, s=20)
+    plt.plot([y_true[:, i].min(), y_true[:, i].max()], 
+             [y_true[:, i].min(), y_true[:, i].max()], 'r--', lw=2)
+    plt.xlabel('True Values')
+    plt.ylabel('Predicted Values')
+    plt.title(f'{group_names[i]}\nR² = {group_metrics[group_names[i]]["r2"]:.4f}')
+    plt.grid(True)
+
+# Residuals for each group
+for i in range(3):
+    plt.subplot(3, 4, i + 5)
+    residuals = y_pred[:, i] - y_true[:, i]
+    plt.scatter(y_pred[:, i], residuals, alpha=0.6, s=20)
+    plt.axhline(y=0, color='r', linestyle='--')
+    plt.xlabel('Predicted Values')
+    plt.ylabel('Residuals')
+    plt.title(f'{group_names[i]} Residuals')
+    plt.grid(True)
+
+# Error distributions
+for i in range(3):
+    plt.subplot(3, 4, i + 9)
+    residuals = y_pred[:, i] - y_true[:, i]
+    plt.hist(residuals, bins=20, alpha=0.7, edgecolor='black')
+    plt.axvline(0, color='red', linestyle='--')
+    plt.xlabel('Residuals')
+    plt.ylabel('Frequency')
+    plt.title(f'{group_names[i]} Error Distribution')
+    plt.grid(True)
+
+# Feature importance heatmap
+plt.subplot(3, 4, 12)
+feature_importance = []
+for i, feature_name in enumerate(input_cols):
+    importance_scores = []
+    for group_idx in range(3):
+        corr = np.corrcoef(X_scaled[:, i], y[:, group_idx])[0, 1]
+        importance_scores.append(abs(corr))
+    feature_importance.append(importance_scores)
+
+feature_importance = np.array(feature_importance)
+sns.heatmap(feature_importance, 
+            xticklabels=['Group 1', 'Group 2', 'Group 3'],
+            yticklabels=[col.replace('_', '\n') for col in input_cols],
+            annot=True, fmt='.3f', cmap='viridis')
+plt.title('Feature-Group Correlations')
+plt.tight_layout()
+
+plt.tight_layout()
+plt.show()
+
+# Input feature correlations with groups
+print(f"\nFeature correlations with each group:")
+for i, feature in enumerate(input_cols):
+    print(f"{feature}:")
+    for j, group_name in enumerate(group_names):
+        corr = np.corrcoef(X_scaled[:, i], y[:, j])[0, 1]
+        print(f"  {group_name}: {corr:.3f}")
+
+print("\n" + "="*60)
+print("MODEL SUMMARY")
+print("="*60)
+print(f"✅ Successfully reduced from {len(target_cols)} outputs to 3 group outputs")
+print(f"✅ Overall R² Score: {overall_r2:.4f}")
+if overall_r2 > 0:
+    print("✅ Model is performing better than baseline!")
+else:
+    print("❌ Model still needs improvement")
+
+print(f"✅ Model complexity reduced significantly")
+print(f"✅ Each group represents the average preference for 10 games")
