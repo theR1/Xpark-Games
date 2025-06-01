@@ -1,3 +1,29 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Extract absolute weights from first layer of the model
+first_layer_weights = model.model[0].weight.detach().cpu().numpy()
+
+# Average absolute weight across all outputs (30 games)
+mean_abs_weights = np.mean(np.abs(first_layer_weights), axis=0)
+
+# Create dataframe
+importance_df = pd.DataFrame({
+    'Feature': input_cols,
+    'Importance': mean_abs_weights
+}).sort_values(by='Importance', ascending=False)
+
+# Plot feature importance with the top 15 features
+plt.figure(figsize=(10, 6))
+plt.barh(importance_df['Feature'][:15][::-1], importance_df['Importance'][:15][::-1])
+plt.xlabel("Average Absolute Weight")
+plt.title("Top 15 Most Important Features (Neural Network)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+//tunned
 import os
 import pandas as pd
 import torch
@@ -15,7 +41,6 @@ from google.colab import files
 uploaded = files.upload()
 filename = list(uploaded.keys())[0]
 df = pd.read_csv(filename)
-
 
 # Define input features (your original selection)
 selected_input_indices = [0, 6, 13, 18, 19]
