@@ -1,3 +1,4 @@
+# Import necessary libraries
 import os
 import pandas as pd
 import numpy as np
@@ -7,10 +8,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 
-# Upload the file
-uploaded = files.upload()
-filename = list(uploaded.keys())[0]
-df = pd.read_csv(filename)
+# Load the dataset
+data = pd.read_csv('./data/policy1.csv')
+
+# If you're uploading a file instead, uncomment these lines:
+# uploaded = files.upload()
+# filename = list(uploaded.keys())[0]
+# data = pd.read_csv(filename)
 
 # Create the output directory if it doesn't exist
 output_dir = './outputs/RandomForest_Fast'
@@ -204,7 +208,6 @@ print("- fast_feature_importance.png")
 print("- rmse_r2_comparison.png") 
 print("- decision_trees_sample.png")
 print("- feature_importance_comparison.png")
-print("- oob_scores.png")
 print("- residuals_analysis.png")
 print("- learning_curves.png")
 print("- fast_results_summary.csv")
@@ -268,49 +271,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'feature_importance_comparison.png'), dpi=300, bbox_inches='tight')
 plt.show()
 
-# 3. Out-of-Bag (OOB) Score Analysis
-print("\n=== OUT-OF-BAG SCORE ANALYSIS ===")
-
-# Create models with OOB scoring enabled
-oob_models = []
-oob_scores = []
-
-for i, (y_group, group_name) in enumerate([(y_group1, "Group 1"), (y_group2, "Group 2"), (y_group3, "Group 3")]):
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_group, test_size=0.2, random_state=42)
-    
-    oob_model = RandomForestRegressor(
-        random_state=42, 
-        n_estimators=50,
-        max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
-        oob_score=True,  # Enable OOB scoring
-        n_jobs=-1
-    )
-    
-    oob_model.fit(X_train, y_train)
-    oob_models.append(oob_model)
-    oob_scores.append(oob_model.oob_score_)
-    print(f"{group_name} OOB Score: {oob_model.oob_score_:.4f}")
-
-# 4. OOB Score Visualization
-fig, ax = plt.subplots(figsize=(8, 6))
-
-bars = ax.bar(groups, oob_scores, color=colors)
-ax.set_title('Out-of-Bag (OOB) Scores by Group', fontsize=14, fontweight='bold')
-ax.set_ylabel('OOB Score', fontsize=12)
-ax.set_ylim(0, 1.0)
-
-# Add value labels on bars
-for bar, score in zip(bars, oob_scores):
-    ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01,
-            f'{score:.3f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, 'oob_scores.png'), dpi=300, bbox_inches='tight')
-plt.show()
-
-# 5. Residuals Analysis
+# 3. Residuals Analysis
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
 for idx, (y_test, y_pred, title) in enumerate([(y_test_1, y_pred_1, "Group 1"), 
@@ -331,7 +292,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'residuals_analysis.png'), dpi=300, bbox_inches='tight')
 plt.show()
 
-# 6. Learning Curves (Training vs Validation Error)
+# 4. Learning Curves (Training vs Validation Error)
 from sklearn.model_selection import validation_curve
 
 print("\n=== GENERATING LEARNING CURVES ===")
