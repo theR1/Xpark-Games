@@ -1,0 +1,426 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+# Upload the file
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+df = pd.read_csv(filename)
+
+# Create the output directory if it doesn't exist
+output_dir = './outputs/GradientBoostingRegressor_Grouped'
+os.makedirs(output_dir, exist_ok=True)
+
+print("Dataset loaded successfully!")
+print(f"Dataset shape: {data.shape}")
+
+# =============================================================================
+# FEATURE SELECTION - SPECIFIC INPUT FEATURES
+# =============================================================================
+print("\n" + "="*60)
+print("FEATURE SELECTION")
+print("="*60)
+
+# Define the specific input features we want to use
+input_feature_names = [
+    'game_id', 
+    'completion_rate', 
+    'revisit_frequency', 
+    'time_spent_same_domain', 
+    'content_same_domain'
+]
+
+print(f"Looking for input features: {input_feature_names}")
+
+# Check if these columns exist in the dataset
+available_features = []
+missing_features = []
+
+for feature in input_feature_names:
+    if feature in data.columns:
+        available_features.append(feature)
+    else:
+        missing_features.append(feature)
+
+print(f"Available features: {available_features}")
+if missing_features:
+    print(f"Missing features: {missing_features}")
+
+# Select input features
+X = data[available_features]
+print(f"Final input features shape: {X.shape}")
+
+# =============================================================================
+# TARGET GROUPING - GAMES 1-10, 11-20, 21-30
+# =============================================================================
+print("\n" + "="*60)
+print("TARGET GROUPING")
+print("="*60)
+
+# Look for game columns (assuming they start with 'game' or similar pattern)
+game_columns = [col for col in data.columns if 'game' in col.lower() and col not in available_features]
+
+if game_columns:
+    y_all = data[game_columns]
+else:
+    # Fallback: assume games start from column after input features
+    start_col = len(available_features)
+    y_all = data.iloc[:, start_col:start_col+30]  # Take next 30 columns
+    game_columns = [f"game_{i+1}" for i in range(y_all.shape[1])]
+    y_all.columns = game_columns
+
+print(f"Total game columns found: {len(game_columns)}")
+print(f"Game columns shape: {y_all.shape}")
+
+# Group the games into 3 groups (10 games each)
+group1_cols = game_columns[:10]   # Games 1-10
+group2_cols = game_columns[10:20] # Games 11-20  
+group3_cols = game_columns[20:30] # Games 21-30
+
+groups = {
+    'Group 1 (Games 1-10)': group1_cols,
+    'Group 2 (Games 11-20)': group2_cols,
+    'Group 3 (Games 21-30)': group3_cols
+}
+
+print(f"Group 1: {len(group1_cols)} games")
+print(f"Group 2: {len(group2_cols)} games") 
+print(f"Group 3: {len(group3_cols)} games")
+
+# =============================================================================
+# DATA PREPROCESSING
+# =============================================================================
+print("\n" + "="*60)
+print("DATA PREPROCESSING")
+print("="*60)
+
+# Normalize the input features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Split the dataset
+X_train, X_test, y_train_all, y_test_all = train_test_split(
+    X_scaled, y_all, test_size=0.2, random_state=42
+)
+
+print(f"Training set size: {X_train.shape[0]}")
+print(f"Test set size: {X_test.shape[0]}")
+
+# =============================================================================
+# TRAIN MODELS FOR EACH GROUP
+# =============================================================================
+group_results = {}
+group_models = {}
+all_predictions = {}
+
+for group_name, group_cols in groups.items():
+    print("\n" + "="*80)
+    print(f"TRAINING: {group_name}")
+    print("="*80)
+    
+    if len(group_cols) == 0:
+        print(f"No columns for {group_name}, skipping...")
+        continue
+    
+    # Get target data for this group
+    y_train_group = y_train_all[group_cols]
+    y_test_group = y_test_all[group_cols]
+    
+    print(f"Target shape for {group_name}: {y_train_group.shape}")
+    
+    # =============================================================================
+    # GRADIENT BOOSTING MODEL
+    # =============================================================================
+    print(f"\nTraining Gradient Boosting Model for {group_name}...")
+    
+    # Use standard Gradient Boosting parameters
+    gb_model = GradientBoostingRegressor(
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=4,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        subsample=0.8,
+        random_state=42
+    )
+    
+    # Wrap with MultiOutputRegressor for multiple targets
+    multi_model = MultiOutputRegressor(gb_model)
+    
+    start_time = time.time()
+    multi_model.fit(X_train, y_train_group)
+    training_time = time.time() - start_time
+    
+    # Make predictions
+    y_pred = multi_model.predict(X_test)
+    
+    # Calculate metrics
+    rmse = np.sqrt(mean_squared_error(y_test_group, y_pred))
+    r2 = r2_score(y_test_group, y_pred)
+    
+    print(f'RMSE: {rmse:.4f}')
+    print(f'R²: {r2:.4f}')
+    print(f'Training time: {training_time:.2f} seconds')
+    
+    # Store results
+    group_results[group_name] = {
+        'rmse': rmse,
+        'r2': r2,
+        'training_time': training_time,
+        'n_targets': len(group_cols)
+    }
+    
+    group_models[group_name] = multi_model
+    all_predictions[group_name] = {
+        'predictions': y_pred,
+        'actual': y_test_group.values
+    }
+
+# =============================================================================
+# OVERALL RESULTS SUMMARY
+# =============================================================================
+print("\n" + "="*80)
+print("OVERALL RESULTS SUMMARY")
+print("="*80)
+
+results_summary = pd.DataFrame({
+    'Group': list(group_results.keys()),
+    'RMSE': [group_results[g]['rmse'] for g in group_results.keys()],
+    'R²': [group_results[g]['r2'] for g in group_results.keys()],
+    'Training_Time_sec': [group_results[g]['training_time'] for g in group_results.keys()],
+    'Num_Targets': [group_results[g]['n_targets'] for g in group_results.keys()]
+})
+
+print(results_summary.to_string(index=False, float_format='%.4f'))
+
+# Calculate overall averages
+avg_rmse = np.mean([group_results[g]['rmse'] for g in group_results.keys()])
+avg_r2 = np.mean([group_results[g]['r2'] for g in group_results.keys()])
+total_time = sum([group_results[g]['training_time'] for g in group_results.keys()])
+
+print(f"\nOVERALL PERFORMANCE:")
+print(f"Average RMSE across groups: {avg_rmse:.4f}")
+print(f"Average R² across groups: {avg_r2:.4f}")
+print(f"Total training time: {total_time:.2f} seconds")
+
+# Find best and worst performing groups
+best_group_rmse = min(group_results.keys(), key=lambda x: group_results[x]['rmse'])
+best_group_r2 = max(group_results.keys(), key=lambda x: group_results[x]['r2'])
+worst_group_rmse = max(group_results.keys(), key=lambda x: group_results[x]['rmse'])
+
+print(f"\nBest RMSE: {best_group_rmse} ({group_results[best_group_rmse]['rmse']:.4f})")
+print(f"Best R²: {best_group_r2} ({group_results[best_group_r2]['r2']:.4f})")
+print(f"Worst RMSE: {worst_group_rmse} ({group_results[worst_group_rmse]['rmse']:.4f})")
+
+# =============================================================================
+# VISUALIZATIONS
+# =============================================================================
+
+# 1. Group Performance Comparison
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+
+groups_names = list(group_results.keys())
+rmse_values = [group_results[g]['rmse'] for g in groups_names]
+r2_values = [group_results[g]['r2'] for g in groups_names]
+time_values = [group_results[g]['training_time'] for g in groups_names]
+
+# RMSE by Group
+bars1 = ax1.bar(range(len(groups_names)), rmse_values, 
+                color=['red', 'orange', 'green'], alpha=0.7, edgecolor='black')
+ax1.set_title('RMSE by Group', fontsize=14, fontweight='bold')
+ax1.set_ylabel('RMSE', fontsize=12)
+ax1.set_xticks(range(len(groups_names)))
+ax1.set_xticklabels([g.replace(' (Games ', '\n(Games ') for g in groups_names])
+ax1.grid(True, axis='y', alpha=0.3)
+for i, v in enumerate(rmse_values):
+    ax1.text(i, v + max(rmse_values)*0.01, f'{v:.3f}', ha='center', va='bottom', fontweight='bold')
+
+# R² by Group
+bars2 = ax2.bar(range(len(groups_names)), r2_values, 
+                color=['red', 'orange', 'green'], alpha=0.7, edgecolor='black')
+ax2.set_title('R² Score by Group', fontsize=14, fontweight='bold')
+ax2.set_ylabel('R² Score', fontsize=12)
+ax2.set_xticks(range(len(groups_names)))
+ax2.set_xticklabels([g.replace(' (Games ', '\n(Games ') for g in groups_names])
+ax2.grid(True, axis='y', alpha=0.3)
+for i, v in enumerate(r2_values):
+    ax2.text(i, v + max(r2_values)*0.01, f'{v:.3f}', ha='center', va='bottom', fontweight='bold')
+
+# Training Time by Group
+bars3 = ax3.bar(range(len(groups_names)), time_values, 
+                color=['blue', 'purple', 'brown'], alpha=0.7, edgecolor='black')
+ax3.set_title('Training Time by Group', fontsize=14, fontweight='bold')
+ax3.set_ylabel('Training Time (seconds)', fontsize=12)
+ax3.set_xticks(range(len(groups_names)))
+ax3.set_xticklabels([g.replace(' (Games ', '\n(Games ') for g in groups_names])
+ax3.grid(True, axis='y', alpha=0.3)
+for i, v in enumerate(time_values):
+    ax3.text(i, v + max(time_values)*0.01, f'{v:.1f}s', ha='center', va='bottom', fontweight='bold')
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'group_performance_comparison.png'), dpi=300, bbox_inches='tight')
+plt.show()
+
+# 2. Predicted vs Actual for each group (first game in each group)
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for idx, (group_name, predictions) in enumerate(all_predictions.items()):
+    ax = axes[idx]
+    
+    # Plot for first game in the group
+    actual_vals = predictions['actual'][:, 0]
+    pred_vals = predictions['predictions'][:, 0]
+    
+    ax.scatter(actual_vals, pred_vals, c=pred_vals, cmap='coolwarm', 
+              s=50, edgecolors='k', alpha=0.7)
+    
+    # Diagonal line
+    min_val = min(actual_vals.min(), pred_vals.min())
+    max_val = max(actual_vals.max(), pred_vals.max())
+    ax.plot([min_val, max_val], [min_val, max_val], 'k--', lw=2, label='Perfect Prediction')
+    
+    # Calculate metrics for this specific game
+    game_rmse = np.sqrt(mean_squared_error(actual_vals, pred_vals))
+    game_r2 = r2_score(actual_vals, pred_vals)
+    
+    ax.set_title(f'{group_name}\nFirst Game: RMSE={game_rmse:.3f}, R²={game_r2:.3f}', 
+                fontweight='bold')
+    ax.set_xlabel('Actual Values')
+    ax.set_ylabel('Predicted Values')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'predictions_by_group.png'), dpi=300, bbox_inches='tight')
+plt.show()
+
+# 3. Feature Importance Analysis
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+for idx, (group_name, model) in enumerate(group_models.items()):
+    ax = axes[idx]
+    
+    # Get feature importances averaged across all estimators in the group
+    importances = np.array([est.feature_importances_ for est in model.estimators_])
+    avg_importance = importances.mean(axis=0)
+    
+    # Sort features by importance
+    sorted_idx = np.argsort(avg_importance)[::-1]
+    sorted_features = [available_features[i] for i in sorted_idx]
+    sorted_importance = avg_importance[sorted_idx]
+    
+    # Create bar plot
+    bars = ax.bar(range(len(available_features)), sorted_importance, 
+                  color='steelblue', alpha=0.8, edgecolor='black')
+    
+    ax.set_title(f'Feature Importance\n{group_name}', fontweight='bold')
+    ax.set_xlabel('Features')
+    ax.set_ylabel('Importance')
+    ax.set_xticks(range(len(available_features)))
+    ax.set_xticklabels(sorted_features, rotation=45, ha='right')
+    ax.grid(True, axis='y', alpha=0.3)
+    
+    # Add value labels on bars
+    for i, v in enumerate(sorted_importance):
+        ax.text(i, v + max(sorted_importance)*0.01, f'{v:.3f}', 
+               ha='center', va='bottom', fontsize=9)
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'feature_importance_by_group.png'), dpi=300, bbox_inches='tight')
+plt.show()
+
+# 4. Performance Metrics Heatmap
+metrics_data = np.array([[group_results[g]['rmse'] for g in groups_names],
+                        [group_results[g]['r2'] for g in groups_names]]).T
+
+fig, ax = plt.subplots(figsize=(8, 6))
+im = ax.imshow(metrics_data, cmap='RdYlGn_r', aspect='auto')
+
+# Set ticks and labels
+ax.set_xticks([0, 1])
+ax.set_xticklabels(['RMSE', 'R²'])
+ax.set_yticks(range(len(groups_names)))
+ax.set_yticklabels([g.replace(' (Games ', '\n(Games ') for g in groups_names])
+
+# Add text annotations
+for i in range(len(groups_names)):
+    for j in range(2):
+        text = ax.text(j, i, f'{metrics_data[i, j]:.4f}', 
+                      ha="center", va="center", color="black", fontweight='bold')
+
+ax.set_title('Model Performance Heatmap\n(Lower RMSE and Higher R² are Better)', 
+             fontsize=14, fontweight='bold')
+plt.colorbar(im)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'performance_heatmap.png'), dpi=300, bbox_inches='tight')
+plt.show()
+
+# =============================================================================
+# SAVE RESULTS
+# =============================================================================
+print("\n" + "="*60)
+print("SAVING RESULTS")
+print("="*60)
+
+# Save detailed results
+with open(os.path.join(output_dir, 'grouped_model_results.txt'), 'w') as f:
+    f.write("GRADIENT BOOSTING GROUPED MODEL RESULTS\n")
+    f.write("="*60 + "\n\n")
+    
+    f.write("MODEL CONFIGURATION:\n")
+    f.write("- Algorithm: Gradient Boosting Regressor\n")
+    f.write("- n_estimators: 100\n")
+    f.write("- learning_rate: 0.1\n")
+    f.write("- max_depth: 4\n")
+    f.write("- min_samples_split: 5\n")
+    f.write("- min_samples_leaf: 2\n")
+    f.write("- subsample: 0.8\n\n")
+    
+    f.write(f"DATASET INFO:\n")
+    f.write(f"- Input Features: {available_features}\n")
+    f.write(f"- Dataset Shape: {data.shape}\n")
+    f.write(f"- Training Samples: {X_train.shape[0]}\n")
+    f.write(f"- Test Samples: {X_test.shape[0]}\n\n")
+    
+    f.write("GROUP PERFORMANCE:\n")
+    f.write("-" * 40 + "\n")
+    for group_name, results in group_results.items():
+        f.write(f"\n{group_name}:\n")
+        f.write(f"  RMSE: {results['rmse']:.4f}\n")
+        f.write(f"  R²: {results['r2']:.4f}\n")
+        f.write(f"  Training Time: {results['training_time']:.2f} seconds\n")
+        f.write(f"  Number of Targets: {results['n_targets']}\n")
+    
+    f.write(f"\nOVERALL SUMMARY:\n")
+    f.write(f"  Average RMSE: {avg_rmse:.4f}\n")
+    f.write(f"  Average R²: {avg_r2:.4f}\n")
+    f.write(f"  Total Training Time: {total_time:.2f} seconds\n")
+    f.write(f"  Best Performing Group (RMSE): {best_group_rmse}\n")
+    f.write(f"  Best Performing Group (R²): {best_group_r2}\n")
+
+# Save summary CSV
+results_summary.to_csv(os.path.join(output_dir, 'group_results_summary.csv'), index=False)
+
+print("Results saved successfully!")
+print(f"Files created in: {output_dir}")
+print("- grouped_model_results.txt")
+print("- group_results_summary.csv") 
+print("- group_performance_comparison.png")
+print("- predictions_by_group.png")
+print("- feature_importance_by_group.png")
+print("- performance_heatmap.png")
+
+print(f"\nGradient Boosting modeling completed!")
+print(f"Average performance across all groups:")
+print(f"- RMSE: {avg_rmse:.4f}")
+print(f"- R²: {avg_r2:.4f}")
+print(f"Check the output directory for detailed results and visualizations.")
