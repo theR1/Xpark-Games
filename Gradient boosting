@@ -140,11 +140,7 @@ for group_name, group_cols in groups.items():
         'actual': y_test_group.values
     }
 
-# OVERALL RESULTS SUMMARY
-print("\n" + "="*80)
-print("OVERALL RESULTS SUMMARY")
-print("="*80)
-
+# overall results summary
 results_summary = pd.DataFrame({
     'Group': list(group_results.keys()),
     'RMSE': [group_results[g]['rmse'] for g in group_results.keys()],
