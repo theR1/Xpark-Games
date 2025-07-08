@@ -1,0 +1,383 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# =====================================================
+# 1. BUSINESS UNDERSTANDING
+# =====================================================
+print("="*60)
+print("CRISP-DM Phase 1: Business Understanding")
+print("="*60)
+print("Objective: Predict CRS efficiency scores from DEA analysis")
+print("Input features: social, environmental, CIP")
+print("Target variable: crs efficiency score")
+print()
+
+# =====================================================
+# 2. DATA UNDERSTANDING
+# =====================================================
+print("="*60)
+print("CRISP-DM Phase 2: Data Understanding")
+print("="*60)
+
+# Load the data
+df = pd.read_excel('dataset for machine learning.xlsx')
+
+# Basic information about the dataset
+print("Dataset shape:", df.shape)
+print("\nColumn names:", df.columns.tolist())
+print("\nData types:")
+print(df.dtypes)
+print("\nFirst few rows:")
+print(df.head())
+
+# Statistical summary
+print("\nStatistical Summary:")
+print(df.describe())
+
+# Check for missing values
+print("\nMissing values:")
+print(df.isnull().sum())
+
+# Create visualizations
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+fig.suptitle('Data Understanding: Distributions and Relationships', fontsize=16)
+
+# Histogram of target variable
+axes[0, 0].hist(df['crs efficiency score'], bins=30, edgecolor='black', alpha=0.7)
+axes[0, 0].set_title('Distribution of CRS Efficiency Score')
+axes[0, 0].set_xlabel('CRS Efficiency Score')
+axes[0, 0].set_ylabel('Frequency')
+
+# Histograms of input features
+features = ['social', 'environmental', 'CIP']
+for i, feature in enumerate(features):
+    row = (i + 1) // 2
+    col = (i + 1) % 2
+    axes[row, col].hist(df[feature], bins=30, edgecolor='black', alpha=0.7)
+    axes[row, col].set_title(f'Distribution of {feature}')
+    axes[row, col].set_xlabel(feature)
+    axes[row, col].set_ylabel('Frequency')
+
+plt.tight_layout()
+plt.show()
+
+# Correlation matrix
+plt.figure(figsize=(10, 8))
+correlation_matrix = df[['social', 'environmental', 'CIP', 'crs efficiency score']].corr()
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, 
+            square=True, linewidths=1, cbar_kws={"shrink": .8})
+plt.title('Correlation Matrix')
+plt.show()
+
+# Scatter plots
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+fig.suptitle('Feature vs Target Relationships', fontsize=16)
+
+for i, feature in enumerate(features):
+    axes[i].scatter(df[feature], df['crs efficiency score'], alpha=0.6)
+    axes[i].set_xlabel(feature)
+    axes[i].set_ylabel('CRS Efficiency Score')
+    axes[i].set_title(f'{feature} vs CRS Efficiency Score')
+    
+    # Add trend line
+    z = np.polyfit(df[feature], df['crs efficiency score'], 1)
+    p = np.poly1d(z)
+    axes[i].plot(df[feature], p(df[feature]), "r--", alpha=0.8)
+
+plt.tight_layout()
+plt.show()
+
+# =====================================================
+# 3. DATA PREPARATION
+# =====================================================
+print("\n" + "="*60)
+print("CRISP-DM Phase 3: Data Preparation")
+print("="*60)
+
+# Separate features and target
+X = df[['social', 'environmental', 'CIP']].values
+y = df['crs efficiency score'].values
+
+print(f"Features shape: {X.shape}")
+print(f"Target shape: {y.shape}")
+
+# Split the data into training and testing sets (80-20 split)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+print(f"\nTraining set size: {X_train.shape[0]}")
+print(f"Testing set size: {X_test.shape[0]}")
+
+# Feature scaling
+scaler_X = StandardScaler()
+X_train_scaled = scaler_X.fit_transform(X_train)
+X_test_scaled = scaler_X.transform(X_test)
+
+# Scale the target variable as well (helps with training stability)
+scaler_y = StandardScaler()
+y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
+
+print("\nFeature scaling completed")
+print(f"Mean of scaled features (train): {X_train_scaled.mean(axis=0)}")
+print(f"Std of scaled features (train): {X_train_scaled.std(axis=0)}")
+
+# =====================================================
+# 4. MODELING
+# =====================================================
+print("\n" + "="*60)
+print("CRISP-DM Phase 4: Modeling")
+print("="*60)
+
+# Build the neural network model
+def create_model(learning_rate=0.001):
+    model = Sequential([
+        # Input layer
+        Dense(64, activation='relu', input_shape=(3,)),
+        Dropout(0.2),
+        
+        # First hidden layer
+        Dense(32, activation='relu'),
+        Dropout(0.2),
+        
+        # Second hidden layer
+        Dense(16, activation='relu'),
+        
+        # Output layer
+        Dense(1, activation='linear')
+    ])
+    
+    # Compile the model
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
+    
+    return model
+
+# Create the model
+model = create_model()
+
+# Display model architecture
+print("Model Architecture:")
+model.summary()
+
+# Define callbacks
+early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+
+# Train the model
+print("\nTraining the model...")
+history = model.fit(
+    X_train_scaled, y_train_scaled,
+    epochs=500,
+    batch_size=16,
+    validation_split=0.2,
+    callbacks=[early_stopping],
+    verbose=1
+)
+
+# Plot training history
+fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+# Loss plot
+axes[0].plot(history.history['loss'], label='Training Loss')
+axes[0].plot(history.history['val_loss'], label='Validation Loss')
+axes[0].set_title('Model Loss During Training')
+axes[0].set_xlabel('Epoch')
+axes[0].set_ylabel('Loss (MSE)')
+axes[0].legend()
+axes[0].grid(True)
+
+# MAE plot
+axes[1].plot(history.history['mae'], label='Training MAE')
+axes[1].plot(history.history['val_mae'], label='Validation MAE')
+axes[1].set_title('Model MAE During Training')
+axes[1].set_xlabel('Epoch')
+axes[1].set_ylabel('MAE')
+axes[1].legend()
+axes[1].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# =====================================================
+# 5. EVALUATION
+# =====================================================
+print("\n" + "="*60)
+print("CRISP-DM Phase 5: Evaluation")
+print("="*60)
+
+# Make predictions
+y_pred_scaled = model.predict(X_test_scaled)
+y_pred = scaler_y.inverse_transform(y_pred_scaled)
+
+# Calculate metrics
+r2 = r2_score(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+
+# Calculate MAPE (Mean Absolute Percentage Error)
+# Avoid division by zero
+mask = y_test != 0
+mape = np.mean(np.abs((y_test[mask] - y_pred.flatten()[mask]) / y_test[mask])) * 100
+
+print(f"Model Performance Metrics:")
+print(f"R² Score: {r2:.4f}")
+print(f"Mean Absolute Error (MAE): {mae:.4f}")
+print(f"Mean Squared Error (MSE): {mse:.4f}")
+print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+print(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+
+# Visualization of predictions
+plt.figure(figsize=(10, 8))
+plt.scatter(y_test, y_pred, alpha=0.6, edgecolors='k', linewidth=0.5)
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+plt.xlabel('Actual CRS Efficiency Score')
+plt.ylabel('Predicted CRS Efficiency Score')
+plt.title(f'Actual vs Predicted Values (R² = {r2:.4f})')
+plt.grid(True, alpha=0.3)
+
+# Add text box with metrics
+textstr = f'R² = {r2:.4f}\nMAE = {mae:.4f}\nRMSE = {rmse:.4f}\nMAPE = {mape:.2f}%'
+props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+plt.text(0.05, 0.95, textstr, transform=plt.gca().transAxes, fontsize=10,
+         verticalalignment='top', bbox=props)
+
+plt.tight_layout()
+plt.show()
+
+# Residual analysis
+residuals = y_test - y_pred.flatten()
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+# Residual distribution
+axes[0].hist(residuals, bins=30, edgecolor='black', alpha=0.7)
+axes[0].set_title('Distribution of Residuals')
+axes[0].set_xlabel('Residuals')
+axes[0].set_ylabel('Frequency')
+axes[0].axvline(x=0, color='r', linestyle='--')
+
+# Residuals vs Predicted values
+axes[1].scatter(y_pred, residuals, alpha=0.6)
+axes[1].axhline(y=0, color='r', linestyle='--')
+axes[1].set_xlabel('Predicted Values')
+axes[1].set_ylabel('Residuals')
+axes[1].set_title('Residuals vs Predicted Values')
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Feature importance (using permutation importance concept)
+print("\nFeature Importance Analysis:")
+baseline_score = r2_score(y_test, y_pred)
+
+feature_importance = {}
+for i, feature in enumerate(features):
+    # Create a copy of test data
+    X_test_permuted = X_test_scaled.copy()
+    
+    # Shuffle the feature
+    np.random.shuffle(X_test_permuted[:, i])
+    
+    # Make predictions with permuted feature
+    y_pred_permuted_scaled = model.predict(X_test_permuted)
+    y_pred_permuted = scaler_y.inverse_transform(y_pred_permuted_scaled)
+    
+    # Calculate degradation in R² score
+    permuted_score = r2_score(y_test, y_pred_permuted)
+    importance = baseline_score - permuted_score
+    feature_importance[feature] = importance
+    
+    print(f"{feature}: {importance:.4f}")
+
+# Plot feature importance
+plt.figure(figsize=(10, 6))
+features_sorted = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+feature_names = [f[0] for f in features_sorted]
+importance_values = [f[1] for f in features_sorted]
+
+plt.bar(feature_names, importance_values)
+plt.title('Feature Importance (based on R² degradation)')
+plt.xlabel('Features')
+plt.ylabel('Importance')
+plt.show()
+
+# =====================================================
+# 6. DEPLOYMENT READY FUNCTION
+# =====================================================
+print("\n" + "="*60)
+print("CRISP-DM Phase 6: Deployment Ready Function")
+print("="*60)
+
+def predict_efficiency(social, environmental, cip):
+    """
+    Predict CRS efficiency score given input features.
+    
+    Parameters:
+    -----------
+    social : float
+        Social input value
+    environmental : float
+        Environmental input value
+    cip : float
+        CIP (Capital Investment Program) value
+    
+    Returns:
+    --------
+    float
+        Predicted CRS efficiency score
+    """
+    # Prepare input
+    input_data = np.array([[social, environmental, cip]])
+    
+    # Scale the input
+    input_scaled = scaler_X.transform(input_data)
+    
+    # Make prediction
+    prediction_scaled = model.predict(input_scaled, verbose=0)
+    
+    # Inverse transform to get actual value
+    prediction = scaler_y.inverse_transform(prediction_scaled)
+    
+    return prediction[0][0]
+
+# Example usage
+print("\nExample predictions:")
+test_cases = [
+    (0.1, 0.5, 0.08),
+    (0.2, 0.3, 0.1),
+    (0.15, 0.4, 0.12)
+]
+
+for social, environmental, cip in test_cases:
+    pred = predict_efficiency(social, environmental, cip)
+    print(f"Input: social={social}, environmental={environmental}, CIP={cip}")
+    print(f"Predicted CRS efficiency score: {pred:.4f}\n")
+
+# Save the model and scalers for future use
+model.save('dea_efficiency_model.h5')
+import joblib
+joblib.dump(scaler_X, 'scaler_X.pkl')
+joblib.dump(scaler_y, 'scaler_y.pkl')
+
+print("Model and scalers saved successfully!")
+print("\nTo load and use the model later:")
+print("model = tf.keras.models.load_model('dea_efficiency_model.h5')")
+print("scaler_X = joblib.load('scaler_X.pkl')")
+print("scaler_y = joblib.load('scaler_y.pkl')")
