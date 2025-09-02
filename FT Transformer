@@ -1,0 +1,206 @@
+!pip install openpyxl
+
+import pandas as pd
+
+# Load your Excel file
+train_df = pd.read_excel("neural_net_training.xlsx", sheet_name=0)
+
+# Quick check
+print(train_df.shape)
+train_df.head()
+
+from google.colab import files
+import pandas as pd
+
+# Upload the file interactively
+uploaded = files.upload()
+
+# Now load it
+test_df = pd.read_excel("test_set.xlsx")
+print("Test shape:", test_df.shape)
+test_df.head()
+
+# ============================================================
+# FT-Transformer for Tabular Regression (TensorFlow/Keras)
+# - Assumes train_df, test_df already exist
+# - Numerical-only features
+# - Standardize -> Feature Tokenizer -> Transformer encoders
+# - EarlyStopping + ReduceLROnPlateau
+# - Config search + multi-seed ensemble
+# ============================================================
+
+import numpy as np, pandas as pd, matplotlib.pyplot as plt, warnings
+warnings.filterwarnings("ignore")
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+np.random.seed(42); tf.random.set_seed(42)
+
+# -----------------------
+# 0) Columns & extraction
+# -----------------------
+input_vars = ["MVApc", "MXpc", "ImWMVA", "ImWMT",
+              "MVAsh", "MXsh", "MHVAsh", "MHXsh"]
+target_var = "efficiency_score"
+
+assert "train_df" in globals() and "test_df" in globals(), "Please create train_df and test_df first."
+
+train_df_clean = train_df.dropna(subset=input_vars + [target_var]).copy()
+test_df_clean  = test_df.dropna(subset=input_vars + [target_var]).copy()
+
+X_train_raw = train_df_clean[input_vars].to_numpy(dtype=np.float32)
+y_train     = train_df_clean[target_var].to_numpy(dtype=np.float32)
+X_test_raw  = test_df_clean[input_vars].to_numpy(dtype=np.float32)
+y_test      = test_df_clean[target_var].to_numpy(dtype=np.float32)
+
+print("Shapes -> X_train:", X_train_raw.shape, "| X_test:", X_test_raw.shape)
+
+# -----------------------
+# 1) Preprocessing
+# -----------------------
+# FT-Transformer usually needs minimal preprocessing; for stability we standardize numerics.
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train_raw).astype(np.float32)
+X_test  = scaler.transform(X_test_raw).astype(np.float32)
+
+n_features = X_train.shape[1]
+
+# -----------------------
+# 2) Metrics helper
+# -----------------------
+def metrics(y_true, y_hat, tag="Model"):
+    mse  = mean_squared_error(y_true, y_hat)
+    rmse = np.sqrt(mse)
+    mae  = mean_absolute_error(y_true, y_hat)
+    denom = np.maximum(np.abs(y_true), np.finfo(float).eps)
+    mape = np.mean(np.abs((y_true - y_hat)/denom)) * 100
+    r2   = r2_score(y_true, y_hat)
+    print(f"{tag:<30} R²={r2:.5f}  RMSE={rmse:.5f}  MAE={mae:.5f}  MSE={mse:.5f}  MAPE={mape:.2f}%")
+    return {"R2":r2, "RMSE":rmse, "MAE":mae, "MSE":mse, "MAPE":mape}
+
+def scatter_plot(y_true, y_hat, title):
+    plt.figure(figsize=(5.6,5.6))
+    plt.scatter(y_true, y_hat, s=18, alpha=0.7)
+    lo, hi = min(y_true.min(), y_hat.min()), max(y_true.max(), y_hat.max())
+    plt.plot([lo,hi],[lo,hi], "r--", lw=2)
+    plt.xlabel("Actual"); plt.ylabel("Predicted"); plt.title(title); plt.grid(alpha=0.2); plt.show()
+
+# -----------------------
+# 3) FT-Transformer model
+# -----------------------
+# We treat each feature as a "token":
+#  - Project each scalar feature (B,F) -> (B,F,d_model) via a shared 1x1 Dense applied per position
+#  - Add a learnable per-feature embedding (F,d_model)
+#  - Prepend a learnable [CLS] token, then apply Transformer encoders
+#  - Use the CLS output to predict a bounded target (sigmoid), since efficiency_score ∈ [0,1]
+
+class FeatureTokenizer(layers.Layer):
+    def __init__(self, n_features, d_model, **kwargs):
+        super().__init__(**kwargs)
+        self.n_features = n_features
+        self.d_model = d_model
+        # shared linear projection for scalar -> d_model, applied per token
+        self.proj = layers.Dense(d_model, use_bias=True)
+        # learnable per-feature embeddings
+        self.feat_embed = self.add_weight(
+            name="feat_embed", shape=(n_features, d_model),
+            initializer="glorot_uniform", trainable=True
+        )
+        # learnable CLS token (1,d_model)
+        self.cls_token = self.add_weight(
+            name="cls_token", shape=(1, d_model),
+            initializer="glorot_uniform", trainable=True
+        )
+
+    def call(self, x):
+        # x: (B, F) -> (B, F, d_model)
+        x = tf.expand_dims(x, axis=-1)                  # (B,F,1)
+        x = self.proj(x)                                # (B,F,d_model)
+        # add per-feature embeddings (broadcast over batch)
+        x = x + self.feat_embed[tf.newaxis, :, :]       # (B,F,d_model)
+        # prepend CLS token
+        cls = tf.broadcast_to(self.cls_token[tf.newaxis, :, :], [tf.shape(x)[0], 1, self.d_model])  # (B,1,d_model)
+        tokens = tf.concat([cls, x], axis=1)            # (B, 1+F, d_model)
+        return tokens
+
+def transformer_block(x, n_heads, d_model, mlp_ratio=2, dropout=0.1):
+    # PreNorm MHA
+    h = layers.LayerNormalization()(x)
+    h = layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model//n_heads, dropout=dropout)(h, h)
+    x = layers.Add()([x, h])
+    # PreNorm FFN
+    h = layers.LayerNormalization()(x)
+    h = layers.Dense(d_model * mlp_ratio, activation="gelu")(h)
+    h = layers.Dropout(dropout)(h)
+    h = layers.Dense(d_model)(h)
+    x = layers.Add()([x, h])
+    return x
+
+def build_ft_transformer(n_features, d_model=64, n_heads=4, n_blocks=3, mlp_ratio=2, dropout=0.15, lr=6e-4):
+    inputs = keras.Input(shape=(n_features,), name="numerics")
+    tokens = FeatureTokenizer(n_features, d_model)(inputs)           # (B, 1+F, d_model)
+    x = tokens
+    for _ in range(n_blocks):
+        x = transformer_block(x, n_heads=n_heads, d_model=d_model, mlp_ratio=mlp_ratio, dropout=dropout)
+    # CLS is first token
+    cls_out = layers.Lambda(lambda t: t[:, 0, :])(x)
+    # small head
+    h = layers.Dense(d_model, activation="relu")(cls_out)
+    out = layers.Dense(1, activation="sigmoid")(h)                   # target in [0,1]
+    model = keras.Model(inputs, out)
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=lr),
+                  loss=keras.losses.Huber(delta=1.0), metrics=["mse"])
+    return model
+
+# -----------------------
+# 4) Config search
+# -----------------------
+X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=2024, shuffle=True)
+
+cfgs = [
+    dict(d_model=64, n_heads=4, n_blocks=3, mlp_ratio=2, dropout=0.15, lr=6e-4),
+    dict(d_model=96, n_heads=4, n_blocks=3, mlp_ratio=2, dropout=0.15, lr=5e-4),
+    dict(d_model=64, n_heads=8, n_blocks=4, mlp_ratio=2, dropout=0.10, lr=5e-4),
+]
+
+callbacks = [
+    keras.callbacks.EarlyStopping(monitor="val_loss", patience=60, restore_best_weights=True, verbose=0),
+    keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=18, min_lr=1e-5, verbose=0)
+]
+
+EPOCHS, BATCH = 800, 32
+best = dict(val=np.inf, cfg=None, model=None)
+
+for i, cfg in enumerate(cfgs, 1):
+    tf.keras.utils.set_random_seed(1000 + i)
+    m = build_ft_transformer(n_features, **cfg)
+    hist = m.fit(X_tr, y_tr, validation_data=(X_val, y_val),
+                 epochs=EPOCHS, batch_size=BATCH, verbose=0, callbacks=callbacks)
+    v = float(np.min(hist.history["val_loss"]))
+    print(f"[FT] cfg {i}: val_loss={v:.6f} | {cfg}")
+    if v < best["val"]:
+        best.update(val=v, cfg=cfg, model=m)
+
+print("Chosen FT cfg:", best["cfg"])
+
+# -----------------------
+# 5) Seed ensemble (multi-run average)
+# -----------------------
+SEEDS = 6
+preds = []
+for s in range(SEEDS):
+    tf.keras.utils.set_random_seed(5000 + s)
+    m = build_ft_transformer(n_features, **best["cfg"])
+    _ = m.fit(X_train, y_train, validation_split=0.15,
+              epochs=EPOCHS, batch_size=BATCH, verbose=0, callbacks=callbacks)
+    preds.append(m.predict(X_test, verbose=0).ravel())
+
+y_pred_ft = np.mean(np.stack(preds, axis=1), axis=1).clip(0,1)  # keep in [0,1]
+m_ft = metrics(y_test, y_pred_ft, tag="FT-Transformer (ensemble)")
+
+scatter_plot(y_test, y_pred_ft, f"FT-Transformer (ensemble) — R²={m_ft['R2']:.3f}")
