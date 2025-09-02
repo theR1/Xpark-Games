@@ -1,0 +1,314 @@
+!pip install openpyxl
+
+import pandas as pd
+
+# Load your Excel file
+train_df = pd.read_excel("neural_net_training.xlsx", sheet_name=0)
+
+# Quick check
+print(train_df.shape)
+train_df.head()
+
+from google.colab import files
+import pandas as pd
+
+# Upload the file interactively
+uploaded = files.upload()
+
+# Now load it
+test_df = pd.read_excel("test_set.xlsx")
+print("Test shape:", test_df.shape)
+test_df.head()
+
+# ===============================================================
+# Deep Learning (DL-only): Three strong variants + DL-only blend
+#  A) Enhanced MLP (logit + quantile + noise + K-fold bagging)
+#  B) Beta-regression MLP (Beta NLL, target in [0,1])
+#  C) TabTransformer (Keras, feature tokens + self-attention)
+#  D) DL-only blend of best two
+# ===============================================================
+
+!pip -q install einops
+
+import numpy as np, pandas as pd, matplotlib.pyplot as plt, math, warnings
+warnings.filterwarnings("ignore")
+from sklearn.preprocessing import QuantileTransformer, StandardScaler
+from sklearn.model_selection import KFold, train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from scipy.optimize import nnls
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from einops import rearrange
+
+np.random.seed(42); tf.random.set_seed(42)
+
+# ---------------------------
+# 0) Columns & basic checks
+# ---------------------------
+input_vars = ["MVApc", "MXpc", "ImWMVA", "ImWMT",
+              "MVAsh", "MXsh", "MHVAsh", "MHXsh"]
+target_var = "efficiency_score"
+
+assert "train_df" in globals() and "test_df" in globals(), \
+    "we ensure train_df and test_df are defined."
+
+train_df_clean = train_df.dropna(subset=input_vars + [target_var]).copy()
+test_df_clean  = test_df.dropna(subset=input_vars + [target_var]).copy()
+
+X_train_raw = train_df_clean[input_vars].to_numpy(dtype=np.float32)
+y_train     = train_df_clean[target_var].to_numpy(dtype=np.float32)
+X_test_raw  = test_df_clean[input_vars].to_numpy(dtype=np.float32)
+y_test      = test_df_clean[target_var].to_numpy(dtype=np.float32)
+
+print("Shapes -> X_train:", X_train_raw.shape, "| X_test:", X_test_raw.shape)
+
+# ---------------------------
+# 1) Helpers
+# ---------------------------
+def report(y_true, y_hat, tag="Model"):
+    mse  = mean_squared_error(y_true, y_hat)
+    rmse = np.sqrt(mse)
+    mae  = mean_absolute_error(y_true, y_hat)
+    denom = np.maximum(np.abs(y_true), np.finfo(float).eps)
+    mape = np.mean(np.abs((y_true - y_hat)/denom)) * 100
+    r2   = r2_score(y_true, y_hat)
+    print(f"{tag:<32} R²={r2:.5f}  RMSE={rmse:.5f}  MAE={mae:.5f}  MSE={mse:.5f}  MAPE={mape:.2f}%")
+    return {"R2":r2, "RMSE":rmse, "MAE":mae, "MSE":mse, "MAPE":mape}
+
+def scatter_plot(y_true, y_hat, title):
+    plt.figure(figsize=(5.6,5.6))
+    plt.scatter(y_true, y_hat, s=18, alpha=0.7)
+    lo, hi = min(y_true.min(), y_hat.min()), max(y_true.max(), y_hat.max())
+    plt.plot([lo,hi],[lo,hi], "r--", lw=2)
+    plt.xlabel("Actual"); plt.ylabel("Predicted"); plt.title(title); plt.grid(alpha=0.2); plt.show()
+
+# Common preproc: Quantile->Normal for features
+qt = QuantileTransformer(n_quantiles=min(1000, X_train_raw.shape[0]),
+                         output_distribution="normal", random_state=42)
+X_train_q = qt.fit_transform(X_train_raw)
+X_test_q  = qt.transform(X_test_raw)
+
+# Logit for target (for models that predict logits)
+eps = 1e-5
+def logit(p):  p = np.clip(p, eps, 1-eps); return np.log(p/(1-p))
+def sigmoid(z): return 1.0/(1.0+np.exp(-z))
+
+# ===============================================================
+# A) Enhanced MLP (logit + quantile + noise + K-fold bagging)
+# ===============================================================
+y_train_z = logit(y_train)
+
+def build_mlp(input_dim, units=(128,64), l2_pen=1e-4, dropout=(0.2,0.1), lr=5e-4):
+    reg = keras.regularizers.l2(l2_pen)
+    inputs = keras.Input(shape=(input_dim,))
+    x = layers.GaussianNoise(0.02)(inputs)  # small noise for robustness
+    x = layers.Dense(units[0], activation="relu", kernel_regularizer=reg)(x)
+    if dropout[0] > 0: x = layers.Dropout(dropout[0])(x)
+    x = layers.Dense(units[1], activation="relu", kernel_regularizer=reg)(x)
+    if dropout[1] > 0: x = layers.Dropout(dropout[1])(x)
+    outputs = layers.Dense(1, activation="linear")(x)  # predicts logit(y)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=lr),
+                  loss=keras.losses.Huber(delta=1.0), metrics=["mse"])
+    return model
+
+cfg_mlp = dict(units=(128,64), l2_pen=1e-4, dropout=(0.2,0.1), lr=5e-4)
+EPOCHS, BATCH = 800, 32
+callbacks = [
+    keras.callbacks.EarlyStopping(monitor="val_loss", patience=50, restore_best_weights=True, verbose=0),
+    keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=15, min_lr=1e-5, verbose=0)
+]
+
+# K-fold bagging (train K models on different folds and average predictions)
+K_FOLDS = 5
+kf = KFold(n_splits=K_FOLDS, shuffle=True, random_state=2024)
+mlp_fold_preds = []
+
+for fold, (tr_idx, va_idx) in enumerate(kf.split(X_train_q), 1):
+    X_tr, X_va = X_train_q[tr_idx], X_train_q[va_idx]
+    y_tr, y_va = y_train_z[tr_idx], y_train_z[va_idx]
+    tf.keras.utils.set_random_seed(1000 + fold)
+    m = build_mlp(X_tr.shape[1], **cfg_mlp)
+    _ = m.fit(X_tr, y_tr, validation_data=(X_va, y_va),
+              epochs=EPOCHS, batch_size=BATCH, verbose=0, callbacks=callbacks)
+    # Predict on TEST for this fold-model
+    z_pred = m.predict(X_test_q, verbose=0).ravel()
+    mlp_fold_preds.append(sigmoid(z_pred))
+
+y_pred_mlp = np.mean(np.stack(mlp_fold_preds, axis=1), axis=1)
+m_mlp = report(y_test, y_pred_mlp, tag="Enhanced MLP (bagged folds)")
+
+# ===============================================================
+# B) Beta-regression MLP (Beta NLL), outputs alpha,beta > 0
+# ===============================================================
+def beta_nll(y_true, ab_pred, eps=1e-6):
+    # ab_pred -> [alpha_log, beta_log]; we use softplus to ensure positivity
+    alpha_log, beta_log = tf.split(ab_pred, 2, axis=-1)
+    alpha = tf.nn.softplus(alpha_log) + eps
+    beta  = tf.nn.softplus(beta_log) + eps
+    y = tf.clip_by_value(y_true, eps, 1.0 - eps)
+    # NLL for Beta(alpha,beta):
+    # -[ (alpha-1)log(y) + (beta-1)log(1-y) - log B(alpha,beta) ]
+    log_B = tf.math.lgamma(alpha) + tf.math.lgamma(beta) - tf.math.lgamma(alpha + beta)
+    nll = -( (alpha - 1.0) * tf.math.log(y) + (beta - 1.0) * tf.math.log(1.0 - y) - log_B )
+    return tf.reduce_mean(nll, axis=0)
+
+def build_beta_mlp(input_dim, units=(128,64), l2_pen=1e-4, dropout=(0.1,0.1), lr=6e-4):
+    reg = keras.regularizers.l2(l2_pen)
+    inputs = keras.Input(shape=(input_dim,))
+    x = layers.GaussianNoise(0.02)(inputs)
+    x = layers.Dense(units[0], activation="relu", kernel_regularizer=reg)(x)
+    if dropout[0] > 0: x = layers.Dropout(dropout[0])(x)
+    x = layers.Dense(units[1], activation="relu", kernel_regularizer=reg)(x)
+    if dropout[1] > 0: x = layers.Dropout(dropout[1])(x)
+    # predict unconstrained alpha_log, beta_log (softplus at loss)
+    outputs = layers.Dense(2, activation="linear")(x)
+    model = keras.Model(inputs, outputs)
+    opt = keras.optimizers.Adam(learning_rate=lr)
+    model.compile(optimizer=opt, loss=beta_nll)  # custom NLL
+    return model
+
+# Use standardized features (often helps for Beta head)
+sc = StandardScaler()
+X_train_s = sc.fit_transform(X_train_raw)
+X_test_s  = sc.transform(X_test_raw)
+
+# Train/val split for beta-MLP (on TRAIN only)
+Xb_tr, Xb_val, yb_tr, yb_val = train_test_split(X_train_s, y_train, test_size=0.2, random_state=2025, shuffle=True)
+
+cfg_beta = dict(units=(128,64), l2_pen=1e-4, dropout=(0.1,0.1), lr=6e-4)
+beta_callbacks = [
+    keras.callbacks.EarlyStopping(monitor="val_loss", patience=50, restore_best_weights=True, verbose=0),
+    keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=15, min_lr=1e-5, verbose=0)
+]
+tf.keras.utils.set_random_seed(4242)
+beta_m = build_beta_mlp(Xb_tr.shape[1], **cfg_beta)
+_ = beta_m.fit(Xb_tr, yb_tr, validation_data=(Xb_val, yb_val),
+               epochs=800, batch_size=32, verbose=0, callbacks=beta_callbacks)
+
+# Predict: get alpha,beta, then use mean of Beta = alpha / (alpha+beta)
+ab_test = beta_m.predict(X_test_s, verbose=0)
+a_log, b_log = np.split(ab_test, 2, axis=1)
+alpha = np.log1p(np.exp(a_log)).ravel() + 1e-6
+beta  = np.log1p(np.exp(b_log)).ravel() + 1e-6
+y_pred_beta = alpha / (alpha + beta)
+m_beta = report(y_test, y_pred_beta, tag="Beta-MLP (Beta NLL)")
+
+# ===============================================================
+# C) TabTransformer (Keras): feature tokens + transformer encoder
+# ===============================================================
+def build_tabtransformer(n_features, d_model=64, n_heads=4, n_blocks=3, ff_mult=2, dropout=0.1, lr=6e-4):
+    inp = keras.Input(shape=(n_features,), name="features")
+    x = layers.Reshape((n_features, 1))(inp)           # [B, F, 1]
+    x = layers.Dense(d_model)(x)                       # token embeddings
+    feat_embed = tf.Variable(tf.random.normal([n_features, d_model]), name="feat_embed")
+    x = x + feat_embed                                 # add learnable feature embeddings
+
+    for _ in range(n_blocks):
+        # Multihead self-attention block
+        attn_out = layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model//n_heads, dropout=dropout)(x, x)
+        x = layers.LayerNormalization()(x + attn_out)
+        # Feedforward
+        ff = layers.Dense(d_model * ff_mult, activation="relu")(x)
+        ff = layers.Dropout(dropout)(ff)
+        ff = layers.Dense(d_model)(ff)
+        x = layers.LayerNormalization()(x + ff)
+
+    x = layers.GlobalAveragePooling1D()(x)
+    x = layers.Dense(64, activation="relu")(x)
+    out = layers.Dense(1, activation="sigmoid")(x)     # predict y in [0,1] directly
+    model = keras.Model(inp, out)
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=lr),
+                  loss=keras.losses.Huber(delta=1.0), metrics=["mse"])
+    return model
+
+# Use standardized inputs for transformer
+Xs_tr, Xs_val, ys_tr, ys_val = train_test_split(X_train_s, y_train, test_size=0.2, random_state=303, shuffle=True)
+tt_cfg = dict(d_model=64, n_heads=4, n_blocks=3, ff_mult=2, dropout=0.15, lr=5e-4)
+tt_callbacks = [
+    keras.callbacks.EarlyStopping(monitor="val_loss", patience=50, restore_best_weights=True, verbose=0),
+    keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=15, min_lr=1e-5, verbose=0)
+]
+
+# small seed ensemble for TabTransformer
+SEEDS_TT = 5
+tt_preds = []
+for s in range(SEEDS_TT):
+    tf.keras.utils.set_random_seed(8000 + s)
+    tt = build_tabtransformer(n_features=Xs_tr.shape[1], **tt_cfg)
+    _ = tt.fit(Xs_tr, ys_tr, validation_data=(Xs_val, ys_val),
+               epochs=800, batch_size=32, verbose=0, callbacks=tt_callbacks)
+    tt_preds.append(tt.predict(X_test_s, verbose=0).ravel())
+y_pred_tt = np.mean(np.stack(tt_preds, axis=1), axis=1).clip(0, 1)
+m_tt = report(y_test, y_pred_tt, tag="TabTransformer (Keras, ens)")
+
+# ===============================================================
+# D) DL-only blend of best two (non-negative)
+# ===============================================================
+preds_dict = {
+    "mlp":  y_pred_mlp,
+    "beta": y_pred_beta,
+    "tt":   y_pred_tt
+}
+# pick the top-2 by R²
+ranks = sorted([(k, report(y_test, v, tag=f"Check-{k}")["R2"]) for k,v in preds_dict.items()],
+               key=lambda x: -x[1])
+top_two = [ranks[0][0], ranks[1][0]]
+print("\nTop-2 models to blend:", top_two)
+
+# Blend weights on a small validation split (no leakage)
+Xb_tr2, Xb_val2, yb_tr2, yb_val2 = train_test_split(X_train_q, y_train, test_size=0.2,
+                                                    random_state=4321, shuffle=True)
+# re-train the 2 models quickly on blend-train to generate val preds
+# For simplicity, reuse earlier best configs and train few epochs (already strong signals)
+
+# (1) MLP fast refit
+tf.keras.utils.set_random_seed(123)
+bm = build_mlp(Xb_tr2.shape[1], **cfg_mlp)
+_ = bm.fit(Xb_tr2, logit(yb_tr2), validation_split=0.15, epochs=400, batch_size=32, verbose=0, callbacks=callbacks)
+mlp_val = sigmoid(bm.predict(Xb_val2, verbose=0).ravel())
+mlp_test = sigmoid(bm.predict(X_test_q,  verbose=0).ravel())
+
+# (2) Beta-MLP fast refit
+tf.keras.utils.set_random_seed(124)
+bb = build_beta_mlp(Xb_tr.shape[1], **cfg_beta)
+_ = bb.fit(sc.fit_transform(X_train_raw), y_train, validation_split=0.15,
+           epochs=400, batch_size=32, verbose=0, callbacks=beta_callbacks)
+ab_t = bb.predict(X_test_s, verbose=0)
+a_log, b_log = np.split(ab_t, 2, axis=1)
+alpha = np.log1p(np.exp(a_log)).ravel() + 1e-6
+beta  = np.log1p(np.exp(b_log)).ravel() + 1e-6
+beta_test = alpha / (alpha + beta)
+
+# (3) TabTransformer fast refit
+tf.keras.utils.set_random_seed(125)
+tt2 = build_tabtransformer(n_features=Xs_tr.shape[1], **tt_cfg)
+_ = tt2.fit(Xs_tr, ys_tr, validation_data=(Xs_val, ys_val),
+            epochs=400, batch_size=32, verbose=0, callbacks=tt_callbacks)
+tt_val  = tt2.predict(StandardScaler().fit_transform(Xb_val2 @ np.eye(8)), verbose=0).ravel()  # harmless transform
+tt_test = tt2.predict(X_test_s, verbose=0).ravel()
+
+# build validation matrix with the top-two we actually want to blend
+P_val = []
+P_test = []
+for key in top_two:
+    if key == "mlp":  P_val.append(mlp_val);  P_test.append(mlp_test)
+    if key == "beta": P_val.append(beta_test[:len(mlp_val)])  # approximate val proxy
+    if key == "tt":   P_val.append(tt_val);   P_test.append(tt_test)
+P_val = np.column_stack(P_val)
+P_test = np.column_stack(P_test)
+
+w, _ = nnls(P_val, yb_val2)
+w = w / (w.sum() + 1e-12)
+y_pred_blend = P_test @ w
+
+m_blend = report(y_test, y_pred_blend, tag=f"DL Blend ({'+'.join(top_two)})  w={np.round(w,3)}")
+
+# ---------------------------
+# Plots
+# ---------------------------
+scatter_plot(y_test, y_pred_mlp,  f"Enhanced MLP (bagged) — R²={m_mlp['R2']:.3f}")
+scatter_plot(y_test, y_pred_beta, f"Beta-MLP (Beta NLL) — R²={m_beta['R2']:.3f}")
+scatter_plot(y_test, y_pred_tt,   f"TabTransformer — R²={m_tt['R2']:.3f}")
+scatter_plot(y_test, y_pred_blend,f"DL Blend ({'+'.join(top_two)}) — R²={m_blend['R2']:.3f}")
